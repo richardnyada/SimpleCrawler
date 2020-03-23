@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Reflection;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using Microsoft.Azure;
@@ -28,7 +29,9 @@ namespace SimpleCrawler
                     var watch = Stopwatch.StartNew();
 
                     //Reading websites from text file
-                    string[] websites = File.ReadAllLines(@"C:\Users\nyada\Desktop\New folder\\Assignment\websites.txt");
+                    string path = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), @"WebsiteFolder/websites.txt");
+                    string[] websites = File.ReadAllLines(path);
+
 
                     await RunScanParallelAsync(websites);
 
