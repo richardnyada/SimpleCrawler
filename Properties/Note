@@ -1,0 +1,362 @@
+Docker compose.
+
+services:
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"      # AMQP
+      - "15672:15672"    # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: publisher
+      RABBITMQ_DEFAULT_PASS: publisher
+      RABBITMQ_DEFAULT_VHOST: ""
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-alerting:
+    image: ""
+    container_name: postgres-alerting
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: alerting
+    ports:
+      - "5442:5432"
+    volumes:
+      - ""
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d alerting"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: ""
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: codesdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - ""
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d codesdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-audit:
+    image: postgres:13.1
+    container_name: postgres-audit
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: AuditDb
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-audit-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d AuditDb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-reporting:
+    image: postgres:13.1
+    container_name: postgres-reporting
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ReportingDb
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres-reporting-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ReportingDb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sqlserver:
+    image: ""
+    container_name: sqlserver
+    restart: unless-stopped
+    ports:
+      - "1433:1433"
+
+  keycloak:
+    image: ""
+    container_name: keycloak
+    restart: unless-stopped
+    depends_on:
+      sqlserver:
+        condition: service_started
+    ports:
+      - "8086:8080"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: true
+      KEYCLOAK_EMAIL_HOST: host.docker.internal
+      KEYCLOAK_EMAIL_PORT: 25
+      KC_HTTP_ENABLED: true
+      KC_DB: mssql
+      KC_DB_URL: jdbc:sqlserver://sqlserver:1433;databaseName=Keycloak;user=Keycloak;password=password123;trustServerCertificate=true
+    volumes:
+      - ./local-dev/keycloak/realm.json:/opt/keycloak/data/import/realm.json
+    command:
+      - start
+      - --import-realm
+      - --hostname-strict=false
+      - --proxy-headers=xforwarded
+      - --http-relative-path=/omsauth
+      - --db=mssql
+      - --url=jdbc:sqlserver://sqlserver:1433;databaseName=Keycloak;user=Keycloak;password=password123;trustServerCertificate=true
+
+  gateway:
+    image: ""
+    container_name: gateway
+    restart: unless-stopped
+    depends_on:
+      keycloak:
+        condition: service_started
+      code-service:
+        condition: service_started
+    ports:
+      - "8092:8092"
+    volumes:
+      - ./local-dev/gateway/appsettings.json:/app/appsettings.Development.json:ro
+      - C:/DevelopmentCertificates/development.pfx:/app/cert.pfx:ro
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      CacheConfiguration: null
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  "":
+    image: ""
+    container_name: ""
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-audit:
+        condition: service_healthy
+      postgres-reporting:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    volumes:
+      - ./local-dev/""/appsettings.json:/app/appsettings.json:ro
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      GatewayBaseUrl: http://gateway:8080
+
+      MessageBus__host: rabbitmq
+      MessageBus__username: publisher
+      MessageBus__password: publisher
+
+      ConnectionStrings__CodesDbWrite: Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres
+      ConnectionStrings__CodesDbRead: Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres
+      ConnectionStrings__CodesAuditDb: Host=postgres-audit;Port=5432;Password=postgres;Database=AuditDb;Username=postgres
+      ConnectionStrings__ReportingDb: Host=postgres-reporting;Port=5432;Password=postgres;Database=ReportingDb;Username=postgres
+
+      Keycloak__TokenEndpoint: ""
+      Keycloak__ClientId: ""
+      Keycloak__ClientSecret: ""
+      Keycloak__GrantType: client_credentials
+
+      Observability__EnableOtlpCollector: false
+      Observability__ServiceName: ""
+      Observability__Environment: local
+
+volumes:
+  postgres-alerting-data:
+  postgres-""-data:
+  postgres-audit-data:
+  postgres-reporting-data:
+
+
+
+
+{
+  "ConnectionStrings": {
+    "": "Host=localhost;Port=5442;Database=alerting;Username=postgres;Password=password"
+  },
+
+  "Gateway": {
+    "BaseUrl": ""
+  },
+
+  "Keycloak": {
+    "TokenEndpoint": "",
+    "ClientId": "ot",
+    "ClientSecret": "",
+    "GrantType": "client_credentials"
+  },
+
+  "JwtBearer": {
+    "RequireHttpsMetadata": false,
+    "MetadataAddress": "h"
+  },
+
+  "MessageBus": {
+    "host": "localhost",
+    "username": "publisher",
+    "password": "publisher"
+  },
+
+  "ScheduledJobs": {
+    "Enabled": true
+  },
+
+  "DistributedJobs": {
+    "CheckIntervalSeconds": 30,
+    "LockTimeoutMinutes": 5
+  },
+
+  "PostgresCache": {
+    "ExpiredItemsDeletionInterval": "00:05:00",
+    "DefaultSlidingExpiration": "00:10:00"
+  },
+
+  "Observability": {
+    "EnableOtlpCollector": false,
+    "ServiceName": "",
+    "Environment": "local"
+  },
+
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  }
+}
+
+
+
+// ./local-dev/gateway/appsettings.json
+{
+  "Observability": {
+    "OtlpEnabled": false,
+    "ServiceName": "",
+    "ServiceNamespace": "",
+    "Environment": "Test"
+  },
+
+  "CacheConfiguration": null,
+
+  "SupportedCultures": [ "en", "ar" ],
+
+  "Kestrel": {
+    "Endpoints": {
+      "Default": {
+        "Certificate": {
+          "Password": "password",
+          "Path": "/app/cert.pfx"
+        },
+        "Url": "https://*:8092"
+      }
+    }
+  },
+
+  "Session": {
+    "SameSiteStrict": true,
+    "Timeout": "00:30:00"
+  },
+
+  "ErrorPath": "/error.jsp",
+  "EnvironmentPrefix": "/dlr",
+
+  "Auth": {
+    "KeycloakUrl": "http://keycloak:8080",
+    "KeycloakRealm": "",
+    "KeycloakPrefix": "/""",
+    "ExposeAdminPortal": true,
+    "ClientId": "",
+    "Scopes": "",
+    "ValidIssuers": [
+      "https://localhost:8092/omsauth/realms/""",
+      "http://keycloak:8080/omsauth/realms/""",
+      "http://gateway:8080/omsauth/realms/""",
+      "http://docker.host.internal:8092/""/realms/oms"
+    ],
+    "DisableNonce": false
+  },
+
+  "": {
+    "Urls": [ "http://"":8080/""" ],
+    "LoginTimeout": "00:00:30",
+    "MaxIdleDuration": "00:01:00",
+    "PermissionsAccessToken": """"
+  },
+
+  "": {
+    "Urls": [],
+    "Username": "admin",
+    "Password": "",
+    "Saga2015": false
+  },
+
+  "FeatureFlags": {
+    "EnvironmentKey": ""
+  }
+}
+
+// ./local-dev/""/appsettings.json
+{
+  "GatewayBaseUrl": "http://"":8080",
+
+  "ConnectionStrings": {
+    "CodesDbWrite": "Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres",
+    "CodesDbRead": "Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres",
+    "CodesAuditDb": "Host=postgres-audit;Port=5432;Password=postgres;Database=AuditDb;Username=postgres",
+    "ReportingDb": "Host=postgres-reporting;Port=5432;Password=postgres;Database=ReportingDb;Username=postgres"
+  },
+
+  "Keycloak": {
+    "TokenEndpoint": "",
+    "ClientId": "",
+    "ClientSecret": "",
+    "GrantType": "client_credentials",
+    "Scope": null,
+    "RefreshPercentage": 0.9
+  },
+
+  "MessageBus": {
+    "host": "rabbitmq",
+    "username": "publisher",
+    "password": "publisher"
+  },
+
+  "Observability": {
+    "EnableOtlpCollector": false,
+    "ServiceName": "",
+    "Environment": "local"
+  },
+
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Aspire.Hosting.Dcp": "Warning"
+    }
+  }
+}
+
