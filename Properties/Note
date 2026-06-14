@@ -1,7 +1,9 @@
-
 using AwesomeAssertions;
 using Certify.Alerting.Service.FeatureFlagging;
 using Certify.Alerting.Service.Tests.Utils;
+using Medallion.Threading;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Text.Json;
 using WireMock.RequestBuilders;
@@ -11,7 +13,7 @@ using Xunit;
 namespace Certify.Alerting.Service.Tests.Features.ExpiringPhysicalStamps;
 
 [Collection("AlertingTestInfrastructureCollection")]
-public sealed class ExpiringPhysicalStampsPollingJobTests : IDisposable
+public sealed class ExpiringPhysicalStampsPollingJobTests : IAsyncLifetime
 {
     private const int SiteId = 123;
     private const int ExpiryWindowInDays = 15;
@@ -20,17 +22,33 @@ public sealed class ExpiringPhysicalStampsPollingJobTests : IDisposable
     private const string KeycloakTokenPath = "/realms/test/protocol/openid-connect/token";
     private const string LegacyUsersPath = "/legacy/api/v2/users";
 
+    private const string JobMetadataCacheKey = "job:metadata:ExpiringPhysicalStampsPollingJob";
+    private const string JobLockKey = "job:lock:ExpiringPhysicalStampsPollingJob";
+
     private readonly AlertingTestInfrastructureFixture _fixture;
 
     public ExpiringPhysicalStampsPollingJobTests(AlertingTestInfrastructureFixture fixture)
     {
         _fixture = fixture;
-
-        DisableExpiringPhysicalStampsJob();
-        Sut.WireMock.ResetLogEntries();
     }
 
     private AlertingTestApplication Sut => _fixture.App;
+
+    public async Task InitializeAsync()
+    {
+        DisableExpiringPhysicalStampsJob();
+        Sut.WireMock.ResetLogEntries();
+
+        await ResetJobMetadata();
+    }
+
+    public async Task DisposeAsync()
+    {
+        DisableExpiringPhysicalStampsJob();
+        Sut.WireMock.ResetLogEntries();
+
+        await ResetJobMetadata();
+    }
 
     [Fact]
     public async Task DoesNotPollCodeService_WhenExpiringPhysicalStampsFeatureIsDisabled()
@@ -120,9 +138,85 @@ public sealed class ExpiringPhysicalStampsPollingJobTests : IDisposable
             "digital-only codes should not cause an ExpiringPhysicalStamps alert event to be published");
     }
 
-    public void Dispose()
+    [Fact]
+    public async Task DoesNotPollCodeService_WhenJobIsNotDue()
     {
-        DisableExpiringPhysicalStampsJob();
+        // Arrange
+        await SetJobMetadataAsNotDue();
+
+        StubKeycloakTokenEndpoint();
+        StubExpiringCodesEndpointWithPhysicalCodes();
+        StubLegacyUsersEndpoint();
+
+        EnableExpiringPhysicalStampsJob();
+
+        // Act
+        await Task.Delay(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        // Assert
+        GetExpiringCodesRequestCount().Should().Be(
+            0,
+            "the distributed job metadata should prevent the polling job from running before its next scheduled time");
+    }
+
+    [Fact]
+    public async Task DoesNotPollCodeServiceAgain_WhenSuccessfulRunUpdatesJobMetadata()
+    {
+        // Arrange
+        StubKeycloakTokenEndpoint();
+        StubExpiringCodesEndpointWithPhysicalCodes();
+        StubLegacyUsersEndpoint();
+
+        EnableExpiringPhysicalStampsJob();
+
+        var firstPollCompleted = await WaitUntilAsync(
+            () => GetExpiringCodesRequestCount() > 0,
+            TimeSpan.FromSeconds(15));
+
+        firstPollCompleted.Should().BeTrue(
+            "the first scheduled execution should poll Code Service");
+
+        await Task.Delay(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        var requestCountAfterSuccessfulRun = GetExpiringCodesRequestCount();
+
+        // Act
+        await Task.Delay(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        // Assert
+        GetExpiringCodesRequestCount().Should().Be(
+            requestCountAfterSuccessfulRun,
+            "after a successful run, the job metadata should prevent another poll until the next scheduled run time");
+    }
+
+    [Fact]
+    public async Task DoesNotPollCodeService_WhenDistributedLockIsAlreadyHeld()
+    {
+        // Arrange
+        StubKeycloakTokenEndpoint();
+        StubExpiringCodesEndpointWithPhysicalCodes();
+        StubLegacyUsersEndpoint();
+
+        var lockProvider = Sut.Services.GetRequiredService<IDistributedLockProvider>();
+
+        await using var heldLock = await lockProvider
+            .CreateLock(JobLockKey)
+            .TryAcquireAsync(
+                TimeSpan.Zero,
+                TestContext.Current.CancellationToken);
+
+        heldLock.Should().NotBeNull(
+            "the test must hold the same distributed lock used by the polling job");
+
+        EnableExpiringPhysicalStampsJob();
+
+        // Act
+        await Task.Delay(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        // Assert
+        GetExpiringCodesRequestCount().Should().Be(
+            0,
+            "another instance holding the distributed lock should prevent this polling job from running");
     }
 
     private void EnableExpiringPhysicalStampsJob()
@@ -143,6 +237,36 @@ public sealed class ExpiringPhysicalStampsPollingJobTests : IDisposable
                 [FeatureFlags.SubscriptionManagementEnabled] = true,
                 [FeatureFlags.ExpiringPhysicalStampsEnabled] = false
             });
+    }
+
+    private async Task ResetJobMetadata()
+    {
+        var cache = Sut.Services.GetRequiredService<IDistributedCache>();
+
+        await cache.RemoveAsync(
+            JobMetadataCacheKey,
+            TestContext.Current.CancellationToken);
+    }
+
+    private async Task SetJobMetadataAsNotDue()
+    {
+        var cache = Sut.Services.GetRequiredService<IDistributedCache>();
+
+        var metadata = JsonSerializer.SerializeToUtf8Bytes(
+            new
+            {
+                NextRunTimeUtc = DateTime.UtcNow.AddHours(1),
+                LastSuccessfulRunUtc = DateTime.UtcNow
+            });
+
+        await cache.SetAsync(
+            JobMetadataCacheKey,
+            metadata,
+            new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(2)
+            },
+            TestContext.Current.CancellationToken);
     }
 
     private void StubKeycloakTokenEndpoint()
