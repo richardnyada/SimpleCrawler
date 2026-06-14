@@ -1,362 +1,299 @@
-Docker compose.
+namespace Certify.Alerting.Service.Alerts.ExpiringPhysicalStamps;
 
-services:
-  rabbitmq:
-    image: rabbitmq:4-management
-    container_name: rabbitmq
-    ports:
-      - "5672:5672"      # AMQP
-      - "15672:15672"    # Management UI
-    environment:
-      RABBITMQ_DEFAULT_USER: publisher
-      RABBITMQ_DEFAULT_PASS: publisher
-      RABBITMQ_DEFAULT_VHOST: ""
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "rabbitmqctl", "status"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  postgres-alerting:
-    image: ""
-    container_name: postgres-alerting
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: alerting
-    ports:
-      - "5442:5432"
-    volumes:
-      - ""
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d alerting"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  postgres:
-    image: ""
-    container_name: postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: codesdb
-    ports:
-      - "5432:5432"
-    volumes:
-      - ""
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d codesdb"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  postgres-audit:
-    image: postgres:13.1
-    container_name: postgres-audit
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: AuditDb
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres-audit-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d AuditDb"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  postgres-reporting:
-    image: postgres:13.1
-    container_name: postgres-reporting
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ReportingDb
-    ports:
-      - "5434:5432"
-    volumes:
-      - postgres-reporting-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ReportingDb"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  sqlserver:
-    image: ""
-    container_name: sqlserver
-    restart: unless-stopped
-    ports:
-      - "1433:1433"
-
-  keycloak:
-    image: ""
-    container_name: keycloak
-    restart: unless-stopped
-    depends_on:
-      sqlserver:
-        condition: service_started
-    ports:
-      - "8086:8080"
-    environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      KC_HEALTH_ENABLED: true
-      KEYCLOAK_EMAIL_HOST: host.docker.internal
-      KEYCLOAK_EMAIL_PORT: 25
-      KC_HTTP_ENABLED: true
-      KC_DB: mssql
-      KC_DB_URL: jdbc:sqlserver://sqlserver:1433;databaseName=Keycloak;user=Keycloak;password=password123;trustServerCertificate=true
-    volumes:
-      - ./local-dev/keycloak/realm.json:/opt/keycloak/data/import/realm.json
-    command:
-      - start
-      - --import-realm
-      - --hostname-strict=false
-      - --proxy-headers=xforwarded
-      - --http-relative-path=/omsauth
-      - --db=mssql
-      - --url=jdbc:sqlserver://sqlserver:1433;databaseName=Keycloak;user=Keycloak;password=password123;trustServerCertificate=true
-
-  gateway:
-    image: ""
-    container_name: gateway
-    restart: unless-stopped
-    depends_on:
-      keycloak:
-        condition: service_started
-      code-service:
-        condition: service_started
-    ports:
-      - "8092:8092"
-    volumes:
-      - ./local-dev/gateway/appsettings.json:/app/appsettings.Development.json:ro
-      - C:/DevelopmentCertificates/development.pfx:/app/cert.pfx:ro
-    environment:
-      ASPNETCORE_ENVIRONMENT: Development
-      CacheConfiguration: null
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  "":
-    image: ""
-    container_name: ""
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      postgres-audit:
-        condition: service_healthy
-      postgres-reporting:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      gateway:
-        condition: service_started
-    volumes:
-      - ./local-dev/""/appsettings.json:/app/appsettings.json:ro
-    environment:
-      ASPNETCORE_ENVIRONMENT: Development
-      GatewayBaseUrl: http://gateway:8080
-
-      MessageBus__host: rabbitmq
-      MessageBus__username: publisher
-      MessageBus__password: publisher
-
-      ConnectionStrings__CodesDbWrite: Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres
-      ConnectionStrings__CodesDbRead: Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres
-      ConnectionStrings__CodesAuditDb: Host=postgres-audit;Port=5432;Password=postgres;Database=AuditDb;Username=postgres
-      ConnectionStrings__ReportingDb: Host=postgres-reporting;Port=5432;Password=postgres;Database=ReportingDb;Username=postgres
-
-      Keycloak__TokenEndpoint: ""
-      Keycloak__ClientId: ""
-      Keycloak__ClientSecret: ""
-      Keycloak__GrantType: client_credentials
-
-      Observability__EnableOtlpCollector: false
-      Observability__ServiceName: ""
-      Observability__Environment: local
-
-volumes:
-  postgres-alerting-data:
-  postgres-""-data:
-  postgres-audit-data:
-  postgres-reporting-data:
-
-
-
-
+public sealed class ExpiringPhysicalStampsPollingJob(
+    ILogger<ExpiringPhysicalStampsPollingJob> logger,
+    IHttpClientFactory httpClientFactory,
+    IDistributedCache cache,
+    IDistributedLockProvider lockProvider,
+    IConfiguration configuration,
+    IServiceScopeFactory serviceScopeFactory,
+    IFeatureFlagService featureFlagService) : BackgroundService
 {
-  "ConnectionStrings": {
-    "": "Host=localhost;Port=5442;Database=alerting;Username=postgres;Password=password"
-  },
+    private const string GatewayServiceHttpClientName = "Gateway";
+    private const string ExpiringCodesPathTemplate = "/codes/v1/expiringcodes/days/{0}";
 
-  "Gateway": {
-    "BaseUrl": ""
-  },
+    private const string JobName = "ExpiringPhysicalStampsPollingJob";
+    private const string JobMetadataCacheKey = "job:metadata:ExpiringPhysicalStampsPollingJob";
+    private const string JobLockKey = "job:lock:ExpiringPhysicalStampsPollingJob";
 
-  "Keycloak": {
-    "TokenEndpoint": "",
-    "ClientId": "ot",
-    "ClientSecret": "",
-    "GrantType": "client_credentials"
-  },
+    private const string CheckIntervalSecondsConfigKey = "DistributedJobs:CheckIntervalSeconds";
+    private const string LockTimeoutMinutesConfigKey = "DistributedJobs:LockTimeoutMinutes";
 
-  "JwtBearer": {
-    "RequireHttpsMetadata": false,
-    "MetadataAddress": "h"
-  },
+    private const int DefaultCheckIntervalSeconds = 30;
+    private const int DefaultLockTimeoutMinutes = 10;
+    private const int NextRunIntervalInDays = 1;
+    private const int JobMetadataExpirationInDays = 30;
 
-  "MessageBus": {
-    "host": "localhost",
-    "username": "publisher",
-    "password": "publisher"
-  },
+    private static readonly int[] ExpiryWindowInDays = [15];
 
-  "ScheduledJobs": {
-    "Enabled": true
-  },
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        logger.LogInformation("Expiring physical stamps polling hosted service started.");
 
-  "DistributedJobs": {
-    "CheckIntervalSeconds": 30,
-    "LockTimeoutMinutes": 5
-  },
+        using var timer = new PeriodicTimer(GetCheckInterval());
 
-  "PostgresCache": {
-    "ExpiredItemsDeletionInterval": "00:05:00",
-    "DefaultSlidingExpiration": "00:10:00"
-  },
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await RunJobIfFeatureEnabled(stoppingToken);
 
-  "Observability": {
-    "EnableOtlpCollector": false,
-    "ServiceName": "",
-    "Environment": "local"
-  },
+                if (!await timer.WaitForNextTickAsync(stoppingToken))
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(
+                    exception,
+                    "Unexpected error occurred while executing hosted service for job {JobName}.",
+                    JobName);
+            }
+        }
 
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
+        logger.LogInformation("Expiring physical stamps polling hosted service stopped.");
     }
-  }
-}
 
+    private async Task RunJobIfFeatureEnabled(CancellationToken cancellationToken)
+    {
+        var isFeatureEnabled = await featureFlagService.IsEnabled(
+            FeatureFlags.ExpiringPhysicalStampsEnabled);
 
+        if (!isFeatureEnabled)
+        {
+            return;
+        }
 
-// ./local-dev/gateway/appsettings.json
-{
-  "Observability": {
-    "OtlpEnabled": false,
-    "ServiceName": "",
-    "ServiceNamespace": "",
-    "Environment": "Test"
-  },
-
-  "CacheConfiguration": null,
-
-  "SupportedCultures": [ "en", "ar" ],
-
-  "Kestrel": {
-    "Endpoints": {
-      "Default": {
-        "Certificate": {
-          "Password": "password",
-          "Path": "/app/cert.pfx"
-        },
-        "Url": "https://*:8092"
-      }
+        await TryRunJob(cancellationToken);
     }
-  },
 
-  "Session": {
-    "SameSiteStrict": true,
-    "Timeout": "00:30:00"
-  },
+    private async Task TryRunJob(CancellationToken cancellationToken)
+    {
+        var nowUtc = DateTime.UtcNow;
+        var metadata = await GetJobMetadata(cancellationToken);
 
-  "ErrorPath": "/error.jsp",
-  "EnvironmentPrefix": "/dlr",
+        if (!IsJobDue(metadata, nowUtc, out var nextRunTimeUtc))
+        {
+            logger.LogDebug(
+                "Job {JobName} is not due yet. Next run time: {NextRunTimeUtc}.",
+                JobName,
+                nextRunTimeUtc);
 
-  "Auth": {
-    "KeycloakUrl": "http://keycloak:8080",
-    "KeycloakRealm": "",
-    "KeycloakPrefix": "/""",
-    "ExposeAdminPortal": true,
-    "ClientId": "",
-    "Scopes": "",
-    "ValidIssuers": [
-      "https://localhost:8092/omsauth/realms/""",
-      "http://keycloak:8080/omsauth/realms/""",
-      "http://gateway:8080/omsauth/realms/""",
-      "http://docker.host.internal:8092/""/realms/oms"
-    ],
-    "DisableNonce": false
-  },
+            return;
+        }
 
-  "": {
-    "Urls": [ "http://"":8080/""" ],
-    "LoginTimeout": "00:00:30",
-    "MaxIdleDuration": "00:01:00",
-    "PermissionsAccessToken": """"
-  },
+        await using var jobLock = await lockProvider
+            .CreateLock(JobLockKey)
+            .TryAcquireAsync(GetLockTimeout(), cancellationToken);
 
-  "": {
-    "Urls": [],
-    "Username": "admin",
-    "Password": "",
-    "Saga2015": false
-  },
+        if (jobLock is null)
+        {
+            logger.LogDebug(
+                "Job {JobName} skipped because distributed lock {JobLockKey} could not be acquired.",
+                JobName,
+                JobLockKey);
 
-  "FeatureFlags": {
-    "EnvironmentKey": ""
-  }
-}
+            return;
+        }
 
-// ./local-dev/""/appsettings.json
-{
-  "GatewayBaseUrl": "http://"":8080",
+        nowUtc = DateTime.UtcNow;
+        metadata = await GetJobMetadata(cancellationToken);
 
-  "ConnectionStrings": {
-    "CodesDbWrite": "Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres",
-    "CodesDbRead": "Host=postgres;Port=5432;Password=postgres;Database=codesdb;Username=postgres",
-    "CodesAuditDb": "Host=postgres-audit;Port=5432;Password=postgres;Database=AuditDb;Username=postgres",
-    "ReportingDb": "Host=postgres-reporting;Port=5432;Password=postgres;Database=ReportingDb;Username=postgres"
-  },
+        if (!IsJobDue(metadata, nowUtc, out nextRunTimeUtc))
+        {
+            logger.LogDebug(
+                "Job {JobName} is no longer due after acquiring the distributed lock. Next run time: {NextRunTimeUtc}.",
+                JobName,
+                nextRunTimeUtc);
 
-  "Keycloak": {
-    "TokenEndpoint": "",
-    "ClientId": "",
-    "ClientSecret": "",
-    "GrantType": "client_credentials",
-    "Scope": null,
-    "RefreshPercentage": 0.9
-  },
+            return;
+        }
 
-  "MessageBus": {
-    "host": "rabbitmq",
-    "username": "publisher",
-    "password": "publisher"
-  },
+        logger.LogInformation(
+            "Job {JobName} acquired distributed lock and will run.",
+            JobName);
 
-  "Observability": {
-    "EnableOtlpCollector": false,
-    "ServiceName": "",
-    "Environment": "local"
-  },
+        var pollingSucceeded = await PollCodeService(cancellationToken);
 
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning",
-      "Aspire.Hosting.Dcp": "Warning"
+        if (!pollingSucceeded)
+        {
+            logger.LogWarning(
+                "Job {JobName} did not complete successfully. Job metadata will not be updated.",
+                JobName);
+
+            return;
+        }
+
+        var completedAtUtc = DateTime.UtcNow;
+        var nextRunUtc = completedAtUtc.AddDays(NextRunIntervalInDays);
+
+        await SetJobMetadata(
+            new ExpiringPhysicalStampsJobMetadata
+            {
+                NextRunTimeUtc = nextRunUtc,
+                LastSuccessfulRunUtc = completedAtUtc
+            },
+            cancellationToken);
+
+        logger.LogInformation(
+            "Job {JobName} completed successfully. Next run time: {NextRunTimeUtc}.",
+            JobName,
+            nextRunUtc);
     }
-  }
-}
 
+    private async Task<bool> PollCodeService(CancellationToken cancellationToken)
+    {
+        var correlationId = Guid.NewGuid();
+
+        try
+        {
+            var client = httpClientFactory.CreateClient(GatewayServiceHttpClientName);
+
+            using var scope = serviceScopeFactory.CreateScope();
+            var alertPublisher = scope.ServiceProvider
+                .GetRequiredService<IExpiringPhysicalStampsAlertPublisher>();
+
+            foreach (var days in ExpiryWindowInDays)
+            {
+                var sites = await GetSitesWithExpiringCodes(
+                    client,
+                    days,
+                    correlationId,
+                    cancellationToken);
+
+                var sitesWithPhysicalStamps = GetSitesWithPhysicalStamps(sites);
+
+                foreach (var site in sitesWithPhysicalStamps)
+                {
+                    logger.LogInformation(
+                        "CorrelationId: {CorrelationId}. SiteId: {SiteId}, SiteName: {SiteName}, SiteGln: {SiteGln}, Code Count: {CodeCount}, Days: {Days}. Publishing expiring physical stamp alert event.",
+                        correlationId,
+                        site.Site.SiteId,
+                        site.Site.SiteName,
+                        site.Site.SiteGln,
+                        site.PhysicalCodes.Count,
+                        days);
+
+                    await alertPublisher.PublishAlert(
+                        site.Site.SiteId,
+                        days,
+                        correlationId);
+                }
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(
+                exception,
+                "CorrelationId: {CorrelationId}. Error occurred while polling Code Service for expiring physical stamps.",
+                correlationId);
+
+            return false;
+        }
+    }
+
+    private async Task<List<CodeServiceExpiringCodesResponse>> GetSitesWithExpiringCodes(
+        HttpClient client,
+        int days,
+        Guid correlationId,
+        CancellationToken cancellationToken)
+    {
+        var path = string.Format(ExpiringCodesPathTemplate, days);
+
+        logger.LogInformation(
+            "CorrelationId: {CorrelationId}. Polling Code Service for expiring physical stamps. Days: {Days}.",
+            correlationId,
+            days);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.Add(CorrelationHeader.CorrelationId, correlationId.ToString());
+
+        using var response = await client.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        return await response.Content.ReadFromJsonAsync<List<CodeServiceExpiringCodesResponse>>(
+            cancellationToken) ?? [];
+    }
+
+    private static List<SiteWithPhysicalStamps> GetSitesWithPhysicalStamps(
+        IEnumerable<CodeServiceExpiringCodesResponse> sites)
+    {
+        return sites
+            .Select(site => new SiteWithPhysicalStamps(
+                site,
+                site.ExpiringCodes
+                    .Where(code => IsPhysical(code.CodeType))
+                    .ToList()))
+            .Where(site => site.PhysicalCodes.Count > 0)
+            .ToList();
+    }
+
+    private async Task<ExpiringPhysicalStampsJobMetadata?> GetJobMetadata(
+        CancellationToken cancellationToken)
+    {
+        return await cache.GetAsync<ExpiringPhysicalStampsJobMetadata>(
+            JobMetadataCacheKey,
+            cancellationToken);
+    }
+
+    private async Task SetJobMetadata(
+        ExpiringPhysicalStampsJobMetadata metadata,
+        CancellationToken cancellationToken)
+    {
+        await cache.SetAsync(
+            JobMetadataCacheKey,
+            metadata,
+            absoluteExpiration: TimeSpan.FromDays(JobMetadataExpirationInDays),
+            cancellationToken: cancellationToken);
+    }
+
+    private TimeSpan GetCheckInterval()
+    {
+        return TimeSpan.FromSeconds(
+            configuration.GetValue(CheckIntervalSecondsConfigKey, DefaultCheckIntervalSeconds));
+    }
+
+    private TimeSpan GetLockTimeout()
+    {
+        return TimeSpan.FromMinutes(
+            configuration.GetValue(LockTimeoutMinutesConfigKey, DefaultLockTimeoutMinutes));
+    }
+
+    private static bool IsJobDue(
+        ExpiringPhysicalStampsJobMetadata? metadata,
+        DateTime nowUtc,
+        out DateTime? nextRunTimeUtc)
+    {
+        nextRunTimeUtc = metadata?.NextRunTimeUtc;
+
+        return nextRunTimeUtc is null || nowUtc >= nextRunTimeUtc.Value;
+    }
+
+    private static bool IsPhysical(string codeType)
+    {
+        return string.Equals(codeType, "Physical", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(codeType, "Ucode", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record SiteWithPhysicalStamps(
+        CodeServiceExpiringCodesResponse Site,
+        List<CodeServiceExpiringCodeResponse> PhysicalCodes);
+
+    private sealed class ExpiringPhysicalStampsJobMetadata
+    {
+        public DateTime? NextRunTimeUtc { get; set; }
+
+        public DateTime? LastSuccessfulRunUtc { get; set; }
+    }
+}
