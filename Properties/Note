@@ -1,25 +1,30 @@
 
-"ScheduledJobs": {
-  "PollIntervalSeconds": 60,
-  "LeadershipDurationHours": 48,
-  "Jobs": [
+using Cronos;
+
+namespace Certify.Alerting.Service.Alerts.Jobs;
+
+public interface IJobSchedule
+{
+    DateTime GetNextRunTimeUtc(
+        DateTime nowUtc,
+        string cronExpression);
+}
+
+public sealed class JobSchedule : IJobSchedule
+{
+    public DateTime GetNextRunTimeUtc(
+        DateTime nowUtc,
+        string cronExpression)
     {
-      "JobName": "ExpiringPhysicalStampsPollingJob",
-      "CronExpression": "0 1 * * *",
-      "Parameter": "15"
-    },
-    {
-      "JobName": "ExpiringPhysicalStampsPollingJob",
-      "CronExpression": "0 1 * * *",
-      "Parameter": "30"
-    },
-    {
-      "JobName": "SomeFiveMinuteJob",
-      "CronExpression": "*/5 * * * *"
-    },
-    {
-      "JobName": "SomeTwoHourlyJob",
-      "CronExpression": "0 */2 * * *"
+        var expression = CronExpression.Parse(
+            cronExpression,
+            CronFormat.Standard);
+
+        return expression.GetNextOccurrence(
+                   nowUtc,
+                   TimeZoneInfo.Utc,
+                   inclusive: false)
+               ?? throw new InvalidOperationException(
+                   $"Unable to calculate the next occurrence for cron expression '{cronExpression}'.");
     }
-  ]
 }
