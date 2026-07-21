@@ -1,1 +1,25 @@
 
+"ScheduledJobs": {
+  "PollIntervalSeconds": 60,
+  "LeadershipDurationHours": 48,
+  "Jobs": [
+    {
+      "JobName": "ExpiringPhysicalStampsPollingJob",
+      "CronExpression": "0 1 * * *",
+      "Parameter": "15"
+    },
+    {
+      "JobName": "ExpiringPhysicalStampsPollingJob",
+      "CronExpression": "0 1 * * *",
+      "Parameter": "30"
+    },
+    {
+      "JobName": "SomeFiveMinuteJob",
+      "CronExpression": "*/5 * * * *"
+    },
+    {
+      "JobName": "SomeTwoHourlyJob",
+      "CronExpression": "0 */2 * * *"
+    }
+  ]
+}
