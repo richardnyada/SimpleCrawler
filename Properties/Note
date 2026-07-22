@@ -1,1 +1,85 @@
+[Fact]
+public async Task DoesNotRun_WhenFeatureFlagIsDisabled()
+{
+    // Arrange
+    const int expiryWindowInDays = DefaultExpiryWindowInDays;
 
+    var setupConfigurationOverrides =
+        CreateExpiryWindowConfigurationOverrides(expiryWindowInDays);
+
+    setupConfigurationOverrides["DeployMode:Value"] = "secondary";
+
+    var runConfigurationOverrides =
+        CreateExpiryWindowConfigurationOverrides(expiryWindowInDays);
+
+    runConfigurationOverrides["DeployMode:Value"] =
+        DeployModeOptions.Primary;
+
+    DisabledExpiringPhysicalStampsJob();
+
+    await using var setupApp =
+        _fixture.CreateApplication(setupConfigurationOverrides);
+
+    await ResetJobMetadata(
+        setupApp.Services,
+        expiryWindowInDays);
+
+    await SetJobDue(
+        setupApp.Services,
+        expiryWindowInDays);
+
+    StubExpiringCodesEndpointWithoutPhysicalCodes(
+        setupApp,
+        expiryWindowInDays);
+
+    var requestCountBeforeRun =
+        GetExpiringCodesRequestCount(
+            setupApp,
+            expiryWindowInDays);
+
+    await using var app =
+        _fixture.CreateApplication(runConfigurationOverrides);
+
+    // Act
+    var metadataWasAdvanced = await WaitUntilAsync(
+        async () =>
+        {
+            var metadata = await GetJobMetadata(
+                app.Services,
+                expiryWindowInDays);
+
+            return metadata?.NextRunTimeUtc is not null
+                && metadata.NextRunTimeUtc.Value > DateTime.UtcNow;
+        },
+        TimeSpan.FromSeconds(20));
+
+    var jobPolledCodeService = await WaitUntilAsync(
+        () => Task.FromResult(
+            GetExpiringCodesRequestCount(
+                app,
+                expiryWindowInDays) > requestCountBeforeRun),
+        TimeSpan.FromSeconds(5));
+
+    // Assert
+    metadataWasAdvanced.Should().BeTrue(
+        "the scheduler should publish the due message and advance the schedule");
+
+    jobPolledCodeService.Should().BeFalse(
+        "the handler should not poll Code Service when the feature switch is disabled");
+
+    GetExpiringCodesRequestCount(
+            app,
+            expiryWindowInDays)
+        .Should()
+        .Be(
+            requestCountBeforeRun,
+            "Code Service should not be called while the feature switch is disabled");
+
+    var metadata = await GetJobMetadata(
+        app.Services,
+        expiryWindowInDays);
+
+    metadata.Should().NotBeNull();
+    metadata!.NextRunTimeUtc.Should().NotBeNull();
+    metadata.NextRunTimeUtc.Value.Should().BeAfter(DateTime.UtcNow);
+}
