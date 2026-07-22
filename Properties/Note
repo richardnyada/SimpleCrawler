@@ -1,19 +1,22 @@
-
 ## Scheduled Jobs
 
-The Alerting Service uses a generic distributed scheduler for running background jobs.
+The Alerting Service uses a generic distributed scheduler to manage background jobs across multiple application instances.
 
-One application instance acquires scheduler leadership using a distributed lock. It retains leadership for the configured `LeadershipDurationHours`, then releases the lock so leadership can be recycled between running instances.
+Only one instance can schedule jobs at a time. The active instance acquires a distributed leadership lock and retains it for the period configured by `LeadershipDurationHours`. When that leadership cycle ends, the lock is released so that any running instance can acquire it and become the scheduler leader.
 
-While holding leadership, the scheduler checks all entries in `ScheduledJobs:Jobs` every `PollIntervalSeconds`. Each job has its own cron expression and persisted next-run time, so only jobs that are due are published for execution. Job metadata is stored independently using the job name and optional parameter as its unique key.
+While holding leadership, the scheduler checks every entry in `ScheduledJobs:Jobs` at the interval configured by `PollIntervalSeconds`. Each job has its own cron expression and persisted next-run time, so only jobs that are due are published for execution.
+
+The job name and optional parameter form the job's unique key. This allows the same handler to be configured multiple times with different parameters while maintaining separate schedule metadata for each configured job.
+
+When a job becomes due, the scheduler publishes a `DueMessage`. The consumer resolves the registered `IDueHandler` whose job name matches the configured `JobName` and passes it the optional parameter.
 
 ### Adding a Scheduled Job
 
-To add a new job:
+To add a new scheduled job:
 
-1. Implement `IDueHandler` for the job and define the `JobName` it handles.
-2. Register the handler and any job-specific services with dependency injection.
-3. Add the job to the `ScheduledJobs:Jobs` collection in `appsettings.json`, using the same `JobName`, a `CronExpression`, and an optional `Parameter`.
+1. Implement `IDueHandler` and specify the job name handled by the implementation.
+2. Register the handler and any job-specific dependencies with dependency injection.
+3. Add the job to the `ScheduledJobs:Jobs` collection in `appsettings.json`. The configured `JobName` must match the name handled by the `IDueHandler`.
 
 For example:
 
