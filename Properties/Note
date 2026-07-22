@@ -1,1 +1,25 @@
 
+## Scheduled Jobs
+
+The Alerting Service uses a generic distributed scheduler for running background jobs.
+
+One application instance acquires scheduler leadership using a distributed lock. It retains leadership for the configured `LeadershipDurationHours`, then releases the lock so leadership can be recycled between running instances.
+
+While holding leadership, the scheduler checks all entries in `ScheduledJobs:Jobs` every `PollIntervalSeconds`. Each job has its own cron expression and persisted next-run time, so only jobs that are due are published for execution. Job metadata is stored independently using the job name and optional parameter as its unique key.
+
+### Adding a Scheduled Job
+
+To add a new job:
+
+1. Implement `IDueHandler` for the job and define the `JobName` it handles.
+2. Register the handler and any job-specific services with dependency injection.
+3. Add the job to the `ScheduledJobs:Jobs` collection in `appsettings.json`, using the same `JobName`, a `CronExpression`, and an optional `Parameter`.
+
+For example:
+
+```json
+{
+  "JobName": "ExampleJob",
+  "CronExpression": "*/5 * * * *",
+  "Parameter": "OptionalValue"
+}
