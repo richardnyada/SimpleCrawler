@@ -1,1 +1,175 @@
+namespace Certify.Alerting.Service.Alerts.Jobs;
 
+public sealed class ScheduledJobsOptions
+{
+    public const string SectionName = "ScheduledJobs";
+
+    public int PollIntervalSeconds { get; init; } = 60;
+
+    public int LeadershipDurationHours { get; init; } = 48;
+
+    public TimeSpan MissedPollRetryWindow { get; init; }
+        = TimeSpan.FromMinutes(5);
+
+    public List<ScheduledJobDefinition> Jobs { get; init; } = [];
+}
+
+public sealed class ScheduledJobDefinition
+{
+    public required string JobName { get; init; }
+
+    public required string CronExpression { get; init; }
+
+    public string? Parameter { get; init; }
+
+    public string Key => string.IsNullOrWhiteSpace(Parameter)
+        ? JobName
+        : $"{JobName}-{Parameter}";
+}
+
+
+
+using Certify.Alerting.Service.Alerts.Jobs;
+using Cronos;
+
+namespace Certify.Alerting.Service.Alerts.ExpiringPhysicalStamps.ExpiringPhysicalStampsJob;
+
+public static class ExpiringPhysicalStampsServiceCollectionExtensions
+{
+    public static IServiceCollection AddExpiringPhysicalStampsJobs(
+        this IServiceCollection services)
+    {
+        services.AddSingleton<IScheduledRunExecutor, ScheduledRunExecutor>();
+        services.AddSingleton<IScheduledRunTracker, ScheduledRunTracker>();
+        services.AddSingleton<IJobMetadataStore, JobMetadataStore>();
+        services.AddSingleton<ISchedulerLockProvider, SchedulerLockProvider>();
+
+        services.AddScoped<IAlertPublisher, AlertPublisher>();
+        services.AddScoped<IJobDueMessagePublisher, JobDueMessagePublisher>();
+        services.AddScoped<IJobDueHandler, ExpiringPhysicalStampsJobDueHandler>();
+        services.AddScoped<ICodeService, CodeService>();
+        services.AddScoped<IPollingService, PollingService>();
+        services.AddScoped<
+            IExpiringPhysicalStampsNotificationPayloadBuilder,
+            ExpiringPhysicalStampsNotificationPayloadBuilder>();
+
+        services.AddOptions<ScheduledJobsOptions>()
+            .BindConfiguration(ScheduledJobsOptions.SectionName)
+            .ValidateDataAnnotations()
+            .Validate(
+                options => options.PollIntervalSeconds > 0,
+                "The scheduled jobs poll interval must be greater than zero")
+            .Validate(
+                options => options.LeadershipDurationHours > 0,
+                "The scheduler leadership duration must be greater than zero")
+            .Validate(
+                options => options.MissedPollRetryWindow > TimeSpan.Zero,
+                "The missed poll retry window must be greater than zero")
+            .Validate(
+                options => TimeSpan.FromSeconds(options.PollIntervalSeconds)
+                    < options.MissedPollRetryWindow,
+                "The scheduled jobs poll interval must be shorter than the missed poll retry window")
+            .Validate(
+                options => options.Jobs.Count > 0,
+                "At least one scheduled job must be configured")
+            .Validate(
+                options => options.Jobs.All(job =>
+                    !string.IsNullOrWhiteSpace(job.JobName)
+                    && !string.IsNullOrWhiteSpace(job.CronExpression)),
+                "Every scheduled job must have a job name and cron expression")
+            .Validate(
+                options => options.Jobs.All(job =>
+                    IsValidCronExpression(job.CronExpression)),
+                "Every scheduled job must have a valid cron expression")
+            .Validate(
+                options => options.Jobs.All(job =>
+                    IsRetryWindowShorterThanSchedule(
+                        job.CronExpression,
+                        options.MissedPollRetryWindow)),
+                "The interval between scheduled runs must be greater than the missed poll retry window")
+            .Validate(
+                options => options.Jobs
+                    .Select(job => job.Key)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count() == options.Jobs.Count,
+                "Every scheduled job must have a unique key")
+            .ValidateOnStart();
+
+        services.AddHostedService<ScheduledJobsService>();
+
+        return services;
+    }
+
+    private static bool IsValidCronExpression(string cronExpression)
+    {
+        try
+        {
+            ParseCronExpression(cronExpression);
+            return true;
+        }
+        catch (CronFormatException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsRetryWindowShorterThanSchedule(
+        string cronExpression,
+        TimeSpan retryWindow)
+    {
+        try
+        {
+            var expression = ParseCronExpression(cronExpression);
+
+            var currentOccurrence =
+                expression.GetNextOccurrence(DateTime.UtcNow);
+
+            if (currentOccurrence is null)
+            {
+                return false;
+            }
+
+            // Inspect several consecutive occurrences because some cron
+            // expressions do not have a constant interval.
+            for (var index = 0; index < 366; index++)
+            {
+                var nextOccurrence =
+                    expression.GetNextOccurrence(currentOccurrence.Value);
+
+                if (nextOccurrence is null)
+                {
+                    return false;
+                }
+
+                if (nextOccurrence.Value - currentOccurrence.Value
+                    <= retryWindow)
+                {
+                    return false;
+                }
+
+                currentOccurrence = nextOccurrence;
+            }
+
+            return true;
+        }
+        catch (CronFormatException)
+        {
+            // Invalid cron expressions are handled by the preceding validation.
+            return true;
+        }
+    }
+
+    private static CronExpression ParseCronExpression(
+        string cronExpression)
+    {
+        var numberOfParts = cronExpression
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Length;
+
+        var format = numberOfParts == 6
+            ? CronFormat.IncludeSeconds
+            : CronFormat.Standard;
+
+        return CronExpression.Parse(cronExpression, format);
+    }
+}
